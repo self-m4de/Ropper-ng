@@ -736,7 +736,7 @@ nx\t- Clears the NX-Flag (ELF|PE)"""
         if len(text) == 0:
             self.help_search()
             return
-        match = re.match('/\d+/', text)
+        match = re.match(r'/\d+/', text)
         qual = None
         if match:
             qual = int(match.group(0)[1:-1])

@@ -43,7 +43,7 @@ import sys
 
 class Searcher(object):
 
-    CONSTRAINT_REGEX = '(\[?[a-zA-Z0-9]+\]?)([\+\*\-=/])?=(\[?[a-zA-Z0-9]+\]?)$'
+    CONSTRAINT_REGEX = r'(\[?[a-zA-Z0-9]+\]?)([\+\*\-=/])?=(\[?[a-zA-Z0-9]+\]?)$'
 
     def prepareFilter(self, filter):
         filter = filter.replace('\\','\\\\')
@@ -257,6 +257,6 @@ class SearcherMIPS(Searcher):
 
     def prepareFilter(self, filter):
         filter = super(SearcherMIPS, self).prepareFilter(filter)
-        filter = filter.replace('$','\$')
+        filter = filter.replace('$',r'\$')
 
         return filter

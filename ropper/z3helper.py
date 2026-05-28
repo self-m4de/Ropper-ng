@@ -43,8 +43,8 @@ class ConstraintCompiler(object):
 
     NUMBER_REGEX = '(-?[0-9]+)'
     REG_REGEX = '(?P<{}>[a-zA-Z0-9]+)'
-    ADJUST_REGEX = '([\\+\-\*/=]=)'
-    ASSIGNMENT_REGEX = '('+REG_REGEX.format('reg_dst_1') + ' *' + ADJUST_REGEX + ' *('+NUMBER_REGEX+'|'+REG_REGEX.format('reg_src_1')+'|(\[)'+REG_REGEX.format('reg_src_2')+'(\])))'
+    ADJUST_REGEX = '([\\+\\-\\*/=]=)'
+    ASSIGNMENT_REGEX = '('+REG_REGEX.format('reg_dst_1') + ' *' + ADJUST_REGEX + ' *('+NUMBER_REGEX+'|'+REG_REGEX.format('reg_src_1')+r'|(\[)'+REG_REGEX.format('reg_src_2')+r'(\])))'
     POP_REGEX = '((pop) +'+REG_REGEX.format('reg_dst_2')+')'
     CONSTRAINT_REGEX = '(' + ASSIGNMENT_REGEX + '|' + POP_REGEX + ')'
 
