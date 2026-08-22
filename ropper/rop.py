@@ -164,7 +164,7 @@ class Ropper(object):
             if opcode.find(b) % 2 == 0:
                 opcode = opcode.replace(b,b'%s%s' % (hexlify(b'\\'),b))
 
-        m = re.search(b'\?', opcode)
+        m = re.search(rb'\?', opcode)
         while m:
             if m.start() % 2 == 0:
                 char = opcode[m.start()+1]
@@ -184,7 +184,7 @@ class Ropper(object):
 
                 opcode = opcode[:m.start()-1] + hexlify(b'['+pack('B',start)+b'-'+pack('B',end)+b']') + opcode[m.start()+1:]
 
-            m = re.search(b'\?', opcode)
+            m = re.search(rb'\?', opcode)
         try:
 
             opcode = unhexlify(opcode)

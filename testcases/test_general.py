@@ -84,7 +84,7 @@ class GeneralTests(unittest.TestCase):
 
         if version_info.major == 3 and version_info.minor >= 2:
             # Wrong question mark position
-            with self.assertRaisesRegex(RopperError,'A \? for the highest 4 bit of a byte is not supported.*'):
+            with self.assertRaisesRegex(RopperError,r'A \? for the highest 4 bit of a byte is not supported.*'):
                 self.rs.searchOpcode('ff?4')
             # Wrong lengh
             with self.assertRaisesRegex(RopperError,'The length of the opcode has to be a multiple of two'):
@@ -94,7 +94,7 @@ class GeneralTests(unittest.TestCase):
                 self.rs.searchOpcode('ff4r')
         else:
             # Wrong question mark position
-            with self.assertRaisesRegexp(RopperError,'A \? for the highest 4 bit of a byte is not supported.*'):
+            with self.assertRaisesRegexp(RopperError,r'A \? for the highest 4 bit of a byte is not supported.*'):
                 self.rs.searchOpcode('ff?4')
             # Wrong lengh
             with self.assertRaisesRegexp(RopperError,'The length of the opcode has to be a multiple of two'):
