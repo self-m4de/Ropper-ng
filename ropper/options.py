@@ -72,6 +72,7 @@ available rop chain generators:
   execve (execve[=<cmd>], default /bin/sh) [Linux x86, x86_64, ARM]
   spawn_shell (spawn_shell[ cmd=<path>][ address=<system>]), ret2libc system, writes cmd to .bss if absent [Linux x86, x86_64, ARM]
   mprotect  (mprotect address=0xdeadbeef size=0x10000) [Linux x86, x86_64]
+  ret2csu (ret2csu[ func_ptr=0x...][arg1=... arg2=... arg3=...]) [Linux x86_64]
   virtualprotect (virtualprotect address=0xdeadbeef) [Windows x86]
 """)
 

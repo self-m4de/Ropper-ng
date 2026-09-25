@@ -120,6 +120,7 @@ Usage
       execve (execve[=<cmd>], default /bin/sh) [Linux x86, x86_64, ARM]
       spawn_shell (spawn_shell[ cmd=<path>][ address=<system>]), ret2libc system, writes cmd to .bss if absent [Linux x86, x86_64, ARM]
       mprotect  (mprotect=<address>:<size>) [Linux x86, x86_64]
+      ret2csu (ret2csu[ func_ptr=0x...][ arg1=... arg2=... arg3=...]) [Linux x86_64]
       virtualprotect (virtualprotect=<address iat vp>:<size>) [Windows x86]
 
     options:
@@ -221,6 +222,8 @@ Usage
       ./Ropper.py --file /bin/ls --chain execve
       ./Ropper.py --file /bin/ls --chain "execve cmd=/bin/sh" --badbytes 000a0d
       ./Ropper.py --file /bin/ls --chain "mprotect address=0xbfdff000 size=0x21000"
+      ./Ropper.py --file /bin/ls --chain ret2csu
+      ./Ropper.py --file /bin/ls --chain "ret2csu func_ptr=0x601028 arg1=0x1 arg2=0x2 arg3=0x3"
       ./Ropper.py --file /bin/ls /lib/libc.so.6 --console
 
       [Assemble/Disassemble]
@@ -250,6 +253,36 @@ Usage
       ./Ropper.py --file /bin/ls --search "mov [%], edx" --quality 1
       0x000084b8: mov dword ptr [eax], edx; ret ;; ret ;
 
+
+ret2csu Chain Generator
+-----------------------
+
+The `ret2csu` chain generator finds and exploits gadgets in `__libc_csu_init`, a function present in most ELF binaries linked with glibc (prior to glibc 2.34). It provides control over the first three x86-64 calling convention registers (`rdi`, `rsi`, `rdx`) through two gadget sequences:
+
+**Gadget 1 (setup):** Pops six registers from the stack.
+
+    pop rbx; pop rbp; pop r12; pop r13; pop r14; pop r15; ret
+
+**Gadget 2 (dispatch):** Moves the loaded registers into the argument registers and calls a function pointer.
+
+    mov rdx, <reg>; mov rsi, <reg>; mov edi, <reg>d; call qword ptr [<reg> + rbx*8]
+
+The exact register mapping varies by compiler version. Ropper automatically detects which variant the binary uses and generates the chain accordingly.
+
+**Basic usage** (scan only, shows gadget addresses and register mapping):
+
+    ropper --file ./vuln --chain ret2csu
+
+**With arguments** (generates a ready-to-use exploit script):
+
+    ropper --file ./vuln --chain "ret2csu func_ptr=0x601028 arg1=0xdeadbeef arg2=0xcafebabe arg3=0xd00dface"
+
+Parameters:
+- `func_ptr` — Address of a **pointer** to the function to call (e.g. a GOT entry, not the function itself)
+- `arg1`, `arg2`, `arg3` — Values for `rdi`, `rsi`, `rdx` respectively (default: 0)
+- `call` — Address to return to after the dispatch (optional)
+
+The generated script includes a reusable `csu_call(func_ptr, arg1, arg2, arg3)` function that can be called multiple times to chain several function calls.
 
 Use ropper in Scripts
 ---------------------

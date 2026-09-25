@@ -7,7 +7,7 @@ version = "1.13.13"
 name = "ropper"
 description = "Show information about files in different file formats and find gadgets to build rop chains for different architectures."
 dependencies = [
-    "filebytes>=0.10.0",
+    "filebytes>=0.9.21",
     "capstone>=3"
 ]
 requires-python = ">=3"
